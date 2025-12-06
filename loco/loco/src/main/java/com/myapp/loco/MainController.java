@@ -7,7 +7,10 @@ import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleObjectProperty;
 import javafx.collections.FXCollections;
+import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
+import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
 import javafx.scene.control.*;
@@ -17,6 +20,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.util.Duration;
+import javafx.util.StringConverter;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -34,26 +38,47 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class MainController {
 
-    @FXML private Button btnDashboard; @FXML private Button btnLogExplorer; @FXML private VBox dashboardView; @FXML private VBox logExplorerView;
+    @FXML private Button btnDashboard; @FXML private Button btnLogExplorer;
+    @FXML private VBox dashboardView; @FXML private VBox logExplorerView;
+
     @FXML private Label lblActiveAgents; @FXML private TextField agentIpField; @FXML private Label scanStatusLabel;
     @FXML private TableView<Agent> agentTableView;
     @FXML private TableColumn<Agent, String> colAgentName; @FXML private TableColumn<Agent, String> colAgentIp; @FXML private TableColumn<Agent, String> colAgentUser;
     @FXML private TableColumn<Agent, String> colAgentStatus; @FXML private TableColumn<Agent, String> colAgentLastSeen; @FXML private TableColumn<Agent, Button> colAgentAction;
-    @FXML private TextField currentTargetField; @FXML private ComboBox<String> logChannelComboBox; @FXML private Spinner<Integer> eventCountSpinner;
-    @FXML private TextField xpathQueryField; @FXML private Button getLogsButton; @FXML private ToggleButton autoRefreshToggle; @FXML private ProgressIndicator loadingIndicator;
+
+    // UI Log Explorer
+    // THAY ĐỔI: TextField -> ComboBox<Agent>
+    @FXML private ComboBox<Agent> targetAgentCombo;
+    @FXML private ComboBox<String> logChannelComboBox;
+    @FXML private Button getLogsButton; @FXML private ToggleButton autoRefreshToggle; @FXML private ProgressIndicator loadingIndicator;
     @FXML private TableView<LogEvent> logTableView;
     @FXML private TableColumn<LogEvent, String> eventIdColumn; @FXML private TableColumn<LogEvent, String> timeColumn; @FXML private TableColumn<LogEvent, String> providerColumn;
-    @FXML private TableColumn<LogEvent, String> levelColumn; @FXML private TableColumn<LogEvent, String> descriptionColumn;
-    @FXML private TableColumn<LogEvent, String> userColumn; @FXML private TableColumn<LogEvent, String> hostColumn; // THÊM CỘT HOST
+    @FXML private TableColumn<LogEvent, String> levelColumn; @FXML private TableColumn<LogEvent, String> descriptionColumn; @FXML private TableColumn<LogEvent, String> userColumn; @FXML private TableColumn<LogEvent, String> hostColumn;
+
+    @FXML private TextField filterUserField;
+    @FXML private TextField filterEventIdField;
+    @FXML private DatePicker filterStartDate;
+    @FXML private DatePicker filterEndDate;
 
     private final ObservableList<Agent> agentList = FXCollections.observableArrayList();
+    private final ObservableList<LogEvent> masterLogList = FXCollections.observableArrayList();
+    private FilteredList<LogEvent> filteredLogList;
+
+    // Agent đại diện cho việc chọn tất cả
+    private final Agent ALL_AGENTS = new Agent("All Agents", "ALL", "Virtual", "", "");
+
     private Timeline autoRefreshTimeline; private Timeline agentHealthCheckTimeline;
     private final HttpClient httpClient = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).connectTimeout(java.time.Duration.ofSeconds(2)).build();
     private final ObjectMapper jsonMapper = new ObjectMapper();
@@ -62,103 +87,38 @@ public class MainController {
 
     @FXML public void initialize() {
         setupDashboard(); setupLogExplorer();
-        addAgentIfNotExists("127.0.0.1", "Online"); updateActiveAgentsCount();
+
+        String localHost = "Unknown"; try { localHost = java.net.InetAddress.getLocalHost().getHostName(); } catch(Exception e){}
+        agentList.add(new Agent(localHost, "127.0.0.1", "Online", System.getProperty("user.name"), LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+        updateActiveAgentsCount();
+
+        // Đồng bộ danh sách Agent vào ComboBox Target
+        updateTargetCombo();
+        agentList.addListener((ListChangeListener<Agent>) c -> updateTargetCombo());
+
         agentHealthCheckTimeline = new Timeline(new KeyFrame(Duration.seconds(15), e -> checkAllAgentsHealth()));
         agentHealthCheckTimeline.setCycleCount(Timeline.INDEFINITE); agentHealthCheckTimeline.play();
+
         PauseTransition pause = new PauseTransition(Duration.seconds(1)); pause.setOnFinished(event -> handleScanNetwork()); pause.play();
     }
 
-    // --- LOGIC HEALTH CHECK (DASHBOARD) ---
-    private void checkSingleAgentHealth(Agent agent) {
-        String ip = agent.getIp();
-        if ("localhost".equals(ip) || "127.0.0.1".equals(ip)) return;
+    private void updateTargetCombo() {
+        // Lưu lại selection hiện tại
+        Agent selected = targetAgentCombo.getValue();
 
-        HttpRequest req = HttpRequest.newBuilder().uri(URI.create("http://" + ip + ":9876/ping")).GET().build();
-        httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString())
-                .thenAccept(res -> Platform.runLater(() -> {
-                    if (res.statusCode() == 200) {
-                        String body = res.body();
-                        if (body.startsWith("pong")) {
-                            agent.setStatus("Online");
-                            // Format mới từ Agent: pong | DOMAIN\User | Hostname
-                            String[] parts = body.split("\\|");
+        ObservableList<Agent> comboItems = FXCollections.observableArrayList();
+        comboItems.add(ALL_AGENTS);
+        comboItems.addAll(agentList);
+        targetAgentCombo.setItems(comboItems);
 
-                            if (parts.length > 1) {
-                                String userRaw = parts[1].trim();
-                                // Tách DOMAIN\User cho Dashboard
-                                if (userRaw.contains("\\")) {
-                                    String[] up = userRaw.split("\\\\");
-                                    agent.setUser(up[1]); // Lấy User (vuduc)
-                                    // Phần up[0] (DESKTOP-XXX) chính là Hostname
-                                    agent.setName(up[0]);
-                                } else {
-                                    agent.setUser(userRaw);
-                                }
-                            }
-                            // Nếu có phần Hostname riêng ở part 2 (fallback)
-                            if (parts.length > 2 && agent.getName().equals("Checking...")) {
-                                agent.setName(parts[2].trim());
-                            }
-
-                            agent.lastSeenProperty().set(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
-                        }
-                    } else { agent.setStatus("Error"); }
-                    agentTableView.refresh(); updateActiveAgentsCount();
-                })).exceptionally(ex -> { Platform.runLater(() -> { agent.setStatus("Offline"); agentTableView.refresh(); updateActiveAgentsCount(); }); return null; });
-    }
-
-    private void checkAllAgentsHealth() { for (Agent agent : agentList) checkSingleAgentHealth(agent); }
-
-    // --- LOGIC PARSING LOG (LOG EXPLORER) ---
-    private List<LogEvent> parseLogEvents(String xmlOutput) throws Exception {
-        List<LogEvent> events = new ArrayList<>();
-        if (xmlOutput == null || xmlOutput.trim().isEmpty()) return events;
-        String validXml = "<Events>" + xmlOutput + "</Events>";
-        DocumentBuilder builder = xmlFactory.newDocumentBuilder(); InputSource is = new InputSource(new StringReader(validXml)); Document doc = builder.parse(is);
-        NodeList eventNodes = doc.getElementsByTagName("Event");
-        for (int i = 0; i < eventNodes.getLength(); i++) {
-            Element eventElement = (Element) eventNodes.item(i);
-            Element systemElement = (Element) eventElement.getElementsByTagName("System").item(0);
-            String eventId = systemElement.getElementsByTagName("EventID").item(0).getTextContent();
-            String timeCreated = ((Element) systemElement.getElementsByTagName("TimeCreated").item(0)).getAttribute("SystemTime");
-            String providerName = ((Element) systemElement.getElementsByTagName("Provider").item(0)).getAttribute("Name");
-            String level = systemElement.getElementsByTagName("Level").item(0).getTextContent();
-
-            // Lấy Hostname từ thẻ <Computer> trong <System> (Chuẩn nhất)
-            String computer = "Unknown";
-            NodeList compNode = systemElement.getElementsByTagName("Computer");
-            if (compNode.getLength() > 0) computer = compNode.item(0).getTextContent();
-
-            Element eventDataElement = (Element) eventElement.getElementsByTagName("EventData").item(0);
-            String user = "N/A"; String fullDetails = "";
-
-            if (eventDataElement != null) {
-                NodeList dataNodes = eventDataElement.getElementsByTagName("Data"); StringBuilder sb = new StringBuilder();
-                for (int j = 0; j < dataNodes.getLength(); j++) {
-                    Node node = dataNodes.item(j); Node nameAttr = node.getAttributes().getNamedItem("Name"); String val = node.getTextContent();
-                    if (nameAttr != null) {
-                        String name = nameAttr.getNodeValue();
-                        sb.append(name).append(": ").append(val).append("\n");
-
-                        // Tách User: DOMAIN\User -> User
-                        if (("User".equals(name) || "TargetUserName".equals(name) || "SubjectUserName".equals(name)) && !val.equals("-")) {
-                            if (val.contains("\\")) {
-                                user = val.substring(val.indexOf("\\") + 1);
-                            } else {
-                                user = val;
-                            }
-                        }
-                    } else sb.append(val).append("\n");
-                }
-                fullDetails = sb.toString().trim();
-            }
-            String description = fullDetails.split("\n")[0] + " [...]";
-            events.add(new LogEvent(eventId, timeCreated, providerName, level, description, user, computer, fullDetails));
+        // Restore selection hoặc chọn All Agents mặc định
+        if (selected != null && comboItems.contains(selected)) {
+            targetAgentCombo.setValue(selected);
+        } else {
+            targetAgentCombo.setValue(ALL_AGENTS);
         }
-        return events;
     }
 
-    // ... (Giữ nguyên các phần khác) ...
     private void setupDashboard() {
         colAgentName.setCellValueFactory(new PropertyValueFactory<>("name")); colAgentIp.setCellValueFactory(new PropertyValueFactory<>("ip"));
         colAgentUser.setCellValueFactory(new PropertyValueFactory<>("user")); colAgentStatus.setCellValueFactory(new PropertyValueFactory<>("status"));
@@ -169,67 +129,224 @@ public class MainController {
         colAgentAction.setCellValueFactory(param -> { Button btn = new Button("Investigate"); btn.getStyleClass().add("button-primary"); btn.setOnAction(event -> switchToLogExplorer(param.getValue())); return new SimpleObjectProperty<>(btn); });
         agentTableView.setItems(agentList);
     }
+
+    private void checkSingleAgentHealth(Agent agent) {
+        String ip = agent.getIp(); if ("localhost".equals(ip) || "127.0.0.1".equals(ip)) return;
+        HttpRequest req = HttpRequest.newBuilder().uri(URI.create("http://" + ip + ":9876/ping")).GET().build();
+        httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString()).thenAccept(res -> Platform.runLater(() -> {
+            if (res.statusCode() == 200) {
+                String body = res.body();
+                if (body.startsWith("pong")) {
+                    agent.setStatus("Online");
+                    String[] parts = body.split("\\|");
+                    if (parts.length > 1) { String userRaw = parts[1].trim(); if (userRaw.contains("\\")) { String[] up = userRaw.split("\\\\"); agent.setUser(up[1]); agent.setName(up[0]); } else agent.setUser(userRaw); }
+                    if (parts.length > 2 && agent.getName().equals("Checking...")) agent.setName(parts[2].trim());
+                    agent.lastSeenProperty().set(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+                }
+            } else agent.setStatus("Error");
+            agentTableView.refresh(); updateActiveAgentsCount();
+        })).exceptionally(ex -> { Platform.runLater(() -> { agent.setStatus("Offline"); agentTableView.refresh(); updateActiveAgentsCount(); }); return null; });
+    }
+    private void checkAllAgentsHealth() { for (Agent agent : agentList) checkSingleAgentHealth(agent); }
     @FXML private void handleScanNetwork() {
         if (scanStatusLabel != null) scanStatusLabel.setText("Scanning all local networks...");
         Task<List<String>> scanTask = new Task<>() { @Override protected List<String> call() throws Exception { return networkScanner.scanAllNetworks(); } };
         scanTask.setOnSucceeded(e -> { List<String> foundIps = scanTask.getValue(); for (String ip : foundIps) addAgentIfNotExists(ip, "Online"); if (scanStatusLabel != null) scanStatusLabel.setText("Scan complete. Found " + foundIps.size() + " agents."); updateActiveAgentsCount(); });
-        scanTask.setOnFailed(e -> { if (scanStatusLabel != null) scanStatusLabel.setText("Scan failed."); e.getSource().getException().printStackTrace(); });
-        new Thread(scanTask).start();
+        scanTask.setOnFailed(e -> { if (scanStatusLabel != null) scanStatusLabel.setText("Scan failed."); e.getSource().getException().printStackTrace(); }); new Thread(scanTask).start();
     }
     @FXML private void handleAddAgent() { String ip = agentIpField.getText().trim(); if (!ip.isEmpty()) { addAgentIfNotExists(ip, "Unknown"); agentIpField.clear(); checkAllAgentsHealth(); } }
-    private boolean addAgentIfNotExists(String ip, String initialStatus) {
-        for (Agent a : agentList) if (a.getIp().equals(ip)) { a.setStatus("Online"); return false; }
-        String name = ip.equals("127.0.0.1") ? "LOCAL-HOST" : "Checking..."; String user = "Checking...";
-        agentList.add(new Agent(name, ip, initialStatus, user, LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")))); return true;
-    }
+    private boolean addAgentIfNotExists(String ip, String initialStatus) { for (Agent a : agentList) if (a.getIp().equals(ip)) { a.setStatus("Online"); return false; } String name = ip.equals("127.0.0.1") ? "LOCAL-HOST" : "Checking..."; String user = "Checking..."; agentList.add(new Agent(name, ip, initialStatus, user, LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")))); return true; }
     private void updateActiveAgentsCount() { lblActiveAgents.setText(String.valueOf(agentList.stream().filter(a -> "Online".equals(a.getStatus())).count())); }
+
     @FXML private void switchView(javafx.event.ActionEvent event) {
         if (event.getSource() == btnDashboard) { dashboardView.setVisible(true); logExplorerView.setVisible(false); btnDashboard.getStyleClass().add("active"); btnLogExplorer.getStyleClass().remove("active"); }
         else if (event.getSource() == btnLogExplorer) { dashboardView.setVisible(false); logExplorerView.setVisible(true); btnDashboard.getStyleClass().remove("active"); btnLogExplorer.getStyleClass().add("active"); }
     }
+
     private void switchToLogExplorer(Agent agent) {
         dashboardView.setVisible(false); logExplorerView.setVisible(true); btnDashboard.getStyleClass().remove("active"); btnLogExplorer.getStyleClass().add("active");
-        if ("localhost".equals(agent.getIp()) || "127.0.0.1".equals(agent.getIp())) currentTargetField.setText("localhost"); else currentTargetField.setText(agent.getIp());
+
+        // Chọn Agent tương ứng trong ComboBox
+        // Vì 'agent' có thể là đối tượng trong list, ta chọn nó
+        targetAgentCombo.setValue(agent);
+
         handleGetLogs();
     }
+
+    // --- LOG EXPLORER ---
     private void setupLogExplorer() {
         logChannelComboBox.setItems(FXCollections.observableArrayList("Microsoft-Windows-Sysmon/Operational", "Application", "Security", "System"));
         logChannelComboBox.setValue("Microsoft-Windows-Sysmon/Operational");
-        eventIdColumn.setCellValueFactory(new PropertyValueFactory<>("eventId")); timeColumn.setCellValueFactory(new PropertyValueFactory<>("timeCreated"));
-        providerColumn.setCellValueFactory(new PropertyValueFactory<>("providerName")); levelColumn.setCellValueFactory(new PropertyValueFactory<>("level"));
-        descriptionColumn.setCellValueFactory(new PropertyValueFactory<>("description")); userColumn.setCellValueFactory(new PropertyValueFactory<>("user"));
-        hostColumn.setCellValueFactory(new PropertyValueFactory<>("host")); // MAP CỘT HOST
+
+        // Config ComboBox display
+        targetAgentCombo.setConverter(new StringConverter<Agent>() {
+            @Override
+            public String toString(Agent agent) {
+                if (agent == null) return "";
+                if ("ALL".equals(agent.getIp())) return "All Agents";
+                return agent.getName() + " (" + agent.getIp() + ")";
+            }
+            @Override
+            public Agent fromString(String string) { return null; }
+        });
+
+        eventIdColumn.setCellValueFactory(new PropertyValueFactory<>("eventId"));
+        timeColumn.setCellValueFactory(new PropertyValueFactory<>("timeCreated"));
+        providerColumn.setCellValueFactory(new PropertyValueFactory<>("providerName"));
+        levelColumn.setCellValueFactory(new PropertyValueFactory<>("level"));
+        descriptionColumn.setCellValueFactory(new PropertyValueFactory<>("description"));
+        userColumn.setCellValueFactory(new PropertyValueFactory<>("user"));
+        hostColumn.setCellValueFactory(new PropertyValueFactory<>("host"));
+
         logTableView.setRowFactory(tv -> { TableRow<LogEvent> row = new TableRow<>(); row.setOnMouseClicked(event -> { if (event.getClickCount() == 2 && (!row.isEmpty())) showLogDetails(row.getItem()); }); return row; });
+
+        filteredLogList = new FilteredList<>(masterLogList, p -> true);
+        SortedList<LogEvent> sortedData = new SortedList<>(filteredLogList);
+        sortedData.comparatorProperty().bind(logTableView.comparatorProperty());
+        logTableView.setItems(sortedData);
+
+        filterUserField.textProperty().addListener((observable, oldValue, newValue) -> updateFilters());
+        filterEventIdField.textProperty().addListener((observable, oldValue, newValue) -> updateFilters());
+        filterStartDate.valueProperty().addListener((observable, oldValue, newValue) -> updateFilters());
+        filterEndDate.valueProperty().addListener((observable, oldValue, newValue) -> updateFilters());
+
         autoRefreshTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> handleGetLogs())); autoRefreshTimeline.setCycleCount(Timeline.INDEFINITE);
         autoRefreshToggle.selectedProperty().addListener((obs, oldVal, newVal) -> { if (newVal) autoRefreshTimeline.play(); else autoRefreshTimeline.stop(); });
     }
-    @FXML private void handleGetLogs() {
-        String target = currentTargetField.getText(); if (target == null || target.isEmpty()) { target = "localhost"; currentTargetField.setText("localhost"); }
-        LogRequest request = new LogRequest(); request.setLogChannel(logChannelComboBox.getValue()); request.setEventCount(eventCountSpinner.getValue()); request.setXpathQuery(xpathQueryField.getText());
-        Task<List<LogEvent>> task;
-        if ("localhost".equals(target) || "127.0.0.1".equals(target)) task = createLocalTask(request);
-        else { if (!target.startsWith("http")) target = "http://" + target + ":9876"; task = createRemoteTask(request, target); }
-        task.setOnSucceeded(e -> { logTableView.setItems(FXCollections.observableArrayList(task.getValue())); loadingIndicator.setVisible(false); });
-        task.setOnFailed(e -> { loadingIndicator.setVisible(false); showError("Fetch Error", "Failed to get logs", task.getException()); });
-        loadingIndicator.setVisible(true); new Thread(task).start();
+
+    private void updateFilters() {
+        String userFilter = filterUserField.getText().toLowerCase();
+        String eventIdFilter = filterEventIdField.getText().toLowerCase();
+        LocalDate startDate = filterStartDate.getValue();
+        LocalDate endDate = filterEndDate.getValue();
+
+        filteredLogList.setPredicate(log -> {
+            if (!userFilter.isEmpty() && (log.getUser() == null || !log.getUser().toLowerCase().contains(userFilter))) return false;
+            if (!eventIdFilter.isEmpty() && !log.getEventId().equals(eventIdFilter)) return false;
+            if (startDate != null || endDate != null) {
+                try {
+                    String logDateStr = log.getTimeCreated().substring(0, 10);
+                    LocalDate logDate = LocalDate.parse(logDateStr);
+                    if (startDate != null && logDate.isBefore(startDate)) return false;
+                    if (endDate != null && logDate.isAfter(endDate)) return false;
+                } catch (Exception e) {}
+            }
+            return true;
+        });
     }
-    private Task<List<LogEvent>> createLocalTask(LogRequest request) {
-        return new Task<>() { @Override protected List<LogEvent> call() throws Exception {
-            List<String> command = new ArrayList<>(); command.add("wevtutil"); command.add("qe"); command.add(request.getLogChannel());
-            command.add("/c:" + request.getEventCount()); command.add("/rd:true"); command.add("/f:xml");
-            if (request.getXpathQuery() != null && !request.getXpathQuery().trim().isEmpty()) command.add("/q:" + request.getXpathQuery());
-            ProcessBuilder pb = new ProcessBuilder(command); pb.redirectErrorStream(true); Process process = pb.start();
-            StringBuilder xmlOutput = new StringBuilder(); try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) { String line; while ((line = reader.readLine()) != null) xmlOutput.append(line).append(System.lineSeparator()); }
-            int exitCode = process.waitFor(); if (exitCode != 0) throw new RuntimeException("wevtutil error: " + xmlOutput);
-            return parseLogEvents(xmlOutput.toString());
-        }};
+
+    @FXML private void handleResetFilters() {
+        filterUserField.clear(); filterEventIdField.clear(); filterStartDate.setValue(null); filterEndDate.setValue(null);
     }
-    private Task<List<LogEvent>> createRemoteTask(LogRequest request, String hostUrl) {
-        return new Task<>() { @Override protected List<LogEvent> call() throws Exception {
-            String jsonBody = jsonMapper.writeValueAsString(request); HttpRequest req = HttpRequest.newBuilder().uri(URI.create(hostUrl + "/get-logs")).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(jsonBody)).build();
-            HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString()); if (res.statusCode() != 200) throw new RuntimeException("Agent Error: " + res.body());
-            return parseLogEvents(res.body());
-        }};
+
+    @FXML
+    private void handleGetLogs() {
+        Agent selectedTarget = targetAgentCombo.getValue();
+        final boolean fetchAll;
+        final String targetIp;
+
+        if (selectedTarget == null || "ALL".equals(selectedTarget.getIp())) {
+            fetchAll = true;
+            targetIp = "ALL";
+        } else {
+            fetchAll = false;
+            targetIp = selectedTarget.getIp();
+        }
+
+        String logChannel = logChannelComboBox.getValue();
+        LogRequest request = new LogRequest();
+        request.setLogChannel(logChannel);
+
+        Task<List<LogEvent>> task = new Task<>() {
+            @Override
+            protected List<LogEvent> call() throws Exception {
+                List<LogEvent> allLogs = new ArrayList<>();
+                ExecutorService executor = Executors.newFixedThreadPool(10);
+                List<Future<List<LogEvent>>> futures = new ArrayList<>();
+
+                for (Agent agent : agentList) {
+                    if ("Offline".equals(agent.getStatus())) continue;
+
+                    // Logic Lọc Target: Nếu không phải ALL và IP không trùng thì bỏ qua
+                    if (!fetchAll && !agent.getIp().equals(targetIp)) continue;
+
+                    Callable<List<LogEvent>> job = () -> {
+                        try {
+                            if ("127.0.0.1".equals(agent.getIp())) {
+                                return fetchLocalLogs(request);
+                            } else {
+                                return fetchRemoteLogs(request, "http://" + agent.getIp() + ":9876");
+                            }
+                        } catch (Exception e) {
+                            return new ArrayList<>();
+                        }
+                    };
+                    futures.add(executor.submit(job));
+                }
+
+                for (Future<List<LogEvent>> f : futures) {
+                    try { allLogs.addAll(f.get()); } catch (Exception e) { e.printStackTrace(); }
+                }
+                executor.shutdown();
+                allLogs.sort((o1, o2) -> o2.getTimeCreated().compareTo(o1.getTimeCreated()));
+                return allLogs;
+            }
+        };
+
+        task.setOnSucceeded(e -> {
+            masterLogList.setAll(task.getValue());
+            loadingIndicator.setVisible(false);
+        });
+
+        task.setOnFailed(e -> {
+            loadingIndicator.setVisible(false);
+            showError("Fetch Error", "Error collecting logs", task.getException());
+        });
+
+        loadingIndicator.setVisible(true);
+        new Thread(task).start();
+    }
+
+    private List<LogEvent> fetchLocalLogs(LogRequest request) throws Exception {
+        List<String> command = new ArrayList<>(); command.add("wevtutil"); command.add("qe"); command.add(request.getLogChannel()); command.add("/rd:true"); command.add("/f:xml");
+        ProcessBuilder pb = new ProcessBuilder(command); pb.redirectErrorStream(true); Process process = pb.start();
+        StringBuilder xmlOutput = new StringBuilder(); try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) { String line; while ((line = reader.readLine()) != null) xmlOutput.append(line).append(System.lineSeparator()); }
+        int exitCode = process.waitFor(); if (exitCode != 0) throw new RuntimeException("Local error: " + xmlOutput);
+        return parseLogEvents(xmlOutput.toString());
+    }
+    private List<LogEvent> fetchRemoteLogs(LogRequest request, String hostUrl) throws Exception {
+        String jsonBody = jsonMapper.writeValueAsString(request); HttpRequest req = HttpRequest.newBuilder().uri(URI.create(hostUrl + "/get-logs")).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(jsonBody)).build();
+        HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString()); if (res.statusCode() != 200) throw new RuntimeException("Remote Error: " + res.body());
+        return parseLogEvents(res.body());
+    }
+    private List<LogEvent> parseLogEvents(String xmlOutput) throws Exception {
+        List<LogEvent> events = new ArrayList<>(); if (xmlOutput == null || xmlOutput.trim().isEmpty()) return events;
+        String validXml = "<Events>" + xmlOutput + "</Events>";
+        DocumentBuilder builder = xmlFactory.newDocumentBuilder(); InputSource is = new InputSource(new StringReader(validXml)); Document doc = builder.parse(is);
+        NodeList eventNodes = doc.getElementsByTagName("Event");
+        for (int i = 0; i < eventNodes.getLength(); i++) {
+            Element eventElement = (Element) eventNodes.item(i);
+            Element systemElement = (Element) eventElement.getElementsByTagName("System").item(0);
+            String eventId = systemElement.getElementsByTagName("EventID").item(0).getTextContent();
+            String timeCreated = ((Element) systemElement.getElementsByTagName("TimeCreated").item(0)).getAttribute("SystemTime");
+            String providerName = ((Element) systemElement.getElementsByTagName("Provider").item(0)).getAttribute("Name");
+            String level = systemElement.getElementsByTagName("Level").item(0).getTextContent();
+            String computer = "Unknown"; NodeList compNode = systemElement.getElementsByTagName("Computer"); if (compNode.getLength() > 0) computer = compNode.item(0).getTextContent();
+            Element eventDataElement = (Element) eventElement.getElementsByTagName("EventData").item(0);
+            String user = "N/A"; String fullDetails = "";
+            if (eventDataElement != null) {
+                NodeList dataNodes = eventDataElement.getElementsByTagName("Data"); StringBuilder sb = new StringBuilder();
+                for (int j = 0; j < dataNodes.getLength(); j++) {
+                    Node node = dataNodes.item(j); Node nameAttr = node.getAttributes().getNamedItem("Name"); String val = node.getTextContent();
+                    if (nameAttr != null) { String name = nameAttr.getNodeValue(); sb.append(name).append(": ").append(val).append("\n"); if (("User".equals(name) || "TargetUserName".equals(name) || "SubjectUserName".equals(name)) && !val.equals("-")) { if (val.contains("\\")) user = val.substring(val.indexOf("\\") + 1); else user = val; } }
+                    else sb.append(val).append("\n");
+                }
+                fullDetails = sb.toString().trim();
+            }
+            String description = fullDetails.split("\n")[0] + " [...]";
+            events.add(new LogEvent(eventId, timeCreated, providerName, level, description, user, computer, fullDetails));
+        }
+        return events;
     }
     private void showLogDetails(LogEvent logEvent) { Alert alert = new Alert(Alert.AlertType.INFORMATION); alert.setTitle("Details"); alert.setHeaderText(logEvent.getEventId()); TextArea area = new TextArea(logEvent.getFullDetails()); area.setEditable(false); area.setWrapText(true); GridPane.setVgrow(area, Priority.ALWAYS); GridPane.setHgrow(area, Priority.ALWAYS); GridPane content = new GridPane(); content.add(area, 0, 0); content.setMaxWidth(Double.MAX_VALUE); alert.getDialogPane().setExpandableContent(content); alert.getDialogPane().setExpanded(true); alert.showAndWait(); }
     private void showError(String t, String h, Throwable ex) { Platform.runLater(() -> { Alert a = new Alert(Alert.AlertType.ERROR); a.setTitle(t); a.setHeaderText(h); a.setContentText(ex.getMessage()); a.showAndWait(); }); }
