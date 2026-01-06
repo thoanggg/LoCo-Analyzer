@@ -11,9 +11,32 @@ import java.util.List;
 public class LocoAgent {
 
     public static void main(String[] args) {
-        System.out.println("Starting loco-agent on port 9876...");
+        System.out.println("Starting loco-agent on port 9876 (HTTPS)...");
 
-        Javalin app = Javalin.create().start(9876);
+        Javalin app = Javalin.create(config -> {
+            config.jetty.modifyServer(server -> {
+                org.eclipse.jetty.util.ssl.SslContextFactory.Server sslContextFactory = new org.eclipse.jetty.util.ssl.SslContextFactory.Server();
+
+                // Load keystore from resources
+                try {
+                    String keystorePath = LocoAgent.class.getResource("/keystore.jks").toExternalForm();
+                    sslContextFactory.setKeyStorePath(keystorePath);
+                } catch (Exception e) {
+                    // Fallback for dev if resource not found (e.g. running from IDE without
+                    // resources)
+                    sslContextFactory.setKeyStorePath("keystore.jks");
+                }
+
+                sslContextFactory.setKeyStorePassword("password123");
+
+                org.eclipse.jetty.server.ServerConnector sslConnector = new org.eclipse.jetty.server.ServerConnector(
+                        server, sslContextFactory);
+                sslConnector.setPort(9876);
+                server.setConnectors(new org.eclipse.jetty.server.Connector[] { sslConnector });
+                // server.addConnector(sslConnector);
+            });
+        }).start(); // Port argument is ignored if server is manually configured, but kept for
+                    // clarity
 
         app.get("/ping", ctx -> {
             String hostName = "Unknown";
@@ -44,6 +67,7 @@ public class LocoAgent {
 
     private static String getActiveUser() {
         try {
+            // ... (rest same)
             Process p = Runtime.getRuntime().exec("wmic computersystem get username");
             BufferedReader input = new BufferedReader(new InputStreamReader(p.getInputStream()));
             String line;
