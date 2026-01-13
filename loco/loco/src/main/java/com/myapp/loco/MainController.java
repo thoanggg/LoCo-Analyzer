@@ -38,7 +38,13 @@ import java.io.StringReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -186,10 +192,7 @@ public class MainController {
     private Timeline autoRefreshTimeline;
     private Timeline agentHealthCheckTimeline;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(java.time.Duration.ofSeconds(2))
-            .build();
+    private final HttpClient httpClient = createInsecureHttpClient();
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final DocumentBuilderFactory xmlFactory = DocumentBuilderFactory.newInstance();
     private final NetworkScanner networkScanner = new NetworkScanner();
@@ -200,6 +203,8 @@ public class MainController {
     @FXML
     public void initialize() {
         setupDashboard();
+        // GLOBAL FIX: Disable strict hostname verification for the internal HttpClient
+        System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
         setupLogExplorer();
         setupLogExplorer();
         setupRulesEngine(); // Init Rules
@@ -517,7 +522,7 @@ public class MainController {
         String ip = agent.getIp();
         if ("localhost".equals(ip) || "127.0.0.1".equals(ip))
             return;
-        HttpRequest req = HttpRequest.newBuilder().uri(URI.create("http://" + ip + ":9876/ping")).GET().build();
+        HttpRequest req = HttpRequest.newBuilder().uri(URI.create("https://" + ip + ":9876/ping")).GET().build();
         httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString()).thenAccept(res -> Platform.runLater(() -> {
             if (res.statusCode() == 200) {
                 String body = res.body();
@@ -550,11 +555,16 @@ public class MainController {
                     if (infoChanged)
                         saveAgents();
                 }
-            } else
-                agent.setStatus("Error");
+            } else {
+                System.err.println(
+                        "Health Check HTTP Error for " + ip + ": Code=" + res.statusCode() + ", Body=" + res.body());
+                agent.setStatus("Error: " + res.statusCode());
+            }
             agentTableView.refresh();
             updateActiveAgentsCount();
         })).exceptionally(ex -> {
+            // Log the error to console for debugging
+            System.err.println("Health Check Failed for " + ip + ": " + ex.getMessage());
             Platform.runLater(() -> {
                 agent.setStatus("Offline");
                 agentTableView.refresh();
@@ -864,7 +874,7 @@ public class MainController {
                             if ("127.0.0.1".equals(agent.getIp()))
                                 return fetchLocalLogs(request);
                             else
-                                return fetchRemoteLogs(request, "http://" + agent.getIp() + ":9876");
+                                return fetchRemoteLogs(request, "https://" + agent.getIp() + ":9876");
                         } catch (Exception e) {
                             return new ArrayList<>();
                         }
@@ -970,8 +980,6 @@ public class MainController {
         return events;
     }
 
-    // Đã xóa hàm applyRules() bị trùng ở đây
-
     private void showLogDetails(LogEvent logEvent) {
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
         alert.setTitle("Details");
@@ -997,5 +1005,45 @@ public class MainController {
             a.setContentText(ex.getMessage());
             a.showAndWait();
         });
+    }
+
+    static {
+        System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
+        System.setProperty("jsse.enableSNIExtension", "false");
+    }
+
+    private static HttpClient createInsecureHttpClient() {
+        try {
+            TrustManager[] trustAllCerts = new TrustManager[] {
+                    new X509TrustManager() {
+                        public X509Certificate[] getAcceptedIssuers() {
+                            return null;
+                        }
+
+                        public void checkClientTrusted(X509Certificate[] certs, String authType) {
+                        }
+
+                        public void checkServerTrusted(X509Certificate[] certs, String authType) {
+                        }
+                    }
+            };
+            SSLContext sc = SSLContext.getInstance("SSL");
+            sc.init(null, trustAllCerts, new SecureRandom());
+
+            // Disable hostname verification by not setting identification algorithm
+            javax.net.ssl.SSLParameters sslParams = new javax.net.ssl.SSLParameters();
+            sslParams.setEndpointIdentificationAlgorithm(null);
+
+            return HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    // Increased timeout to 10s to handle slow SSL handshakes on local network
+                    .connectTimeout(java.time.Duration.ofSeconds(10))
+                    .sslContext(sc)
+                    .sslParameters(sslParams)
+                    .build();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return HttpClient.newHttpClient();
+        }
     }
 }

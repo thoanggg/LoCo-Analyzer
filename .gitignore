@@ -1,0 +1,14 @@
+# Maven
+target/
+*.jar
+!loco-agent/target/loco-agent-*-shaded.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Security
+*.jks
+keystore.jks
+src/main/resources/keystore.jks
