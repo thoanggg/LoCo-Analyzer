@@ -36,3 +36,10 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Application logs and data ###
+*.db
+*.sqlite
+*.json
+*.log
+!src/main/resources/**/*.json

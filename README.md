@@ -70,3 +70,13 @@ To run the agent in the background and auto-start with Windows:
 3.  Place `loco-agent.exe`, `loco-agent.xml`, and `install_service.bat` in the same folder as your JAR (`C:\Tools\`).
 4.  Right-click `install_service.bat` and **Run as Administrator**.
     *   *To uninstall: Run `uninstall_service.bat` as Administrator.*
+
+### 5. Manual Service Installation (Command Line)
+If you prefer not to use the `.bat` files:
+1.  Open **Command Prompt (Admin)**.
+2.  Navigate to the folder: `cd C:\Tools\`
+3.  Run: `loco-agent.exe install`
+4.  Run: `loco-agent.exe start`
+5.  To stop and remove:
+    *   `loco-agent.exe stop`
+    *   `loco-agent.exe uninstall`
