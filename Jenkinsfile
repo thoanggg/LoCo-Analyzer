@@ -24,7 +24,8 @@ pipeline {
                     script {
                         try {
                             withSonarQubeEnv('SonarQube') {
-                                sh './mvnw sonar:sonar'
+                                // Updated based on SonarQube UI recommendation
+                                sh './mvnw clean verify sonar:sonar -Dsonar.projectKey=Loco -Dsonar.projectName="Loco"'
                             }
                         } catch (Exception e) {
                             echo 'SonarQube not configured or failed, skipping...'
