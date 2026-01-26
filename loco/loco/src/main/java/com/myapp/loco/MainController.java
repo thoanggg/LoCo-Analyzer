@@ -1,6 +1,5 @@
 package com.myapp.loco;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
@@ -22,7 +21,6 @@ import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
-import javafx.scene.layout.HBox;
 import javafx.stage.FileChooser;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.MenuItem;
@@ -37,19 +35,14 @@ import org.xml.sax.InputSource;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.StringReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.security.SecureRandom;
-import java.security.cert.X509Certificate;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -194,9 +187,7 @@ public class MainController {
     private final ObservableList<AdvancedRulesEngine.RuleMetadata> metadataList = FXCollections.observableArrayList(); // New
     // List
 
-    private final Agent ALL_AGENTS = new Agent("All Agents", "ALL", "Virtual", "", "");
-    private Timeline autoRefreshTimeline;
-    private Timeline agentHealthCheckTimeline;
+    private final Agent allAgents = new Agent("All Agents", "ALL", "Virtual", "", "");
 
     private final HttpClient httpClient = createInsecureHttpClient();
     private final ObjectMapper jsonMapper = new ObjectMapper();
@@ -221,7 +212,8 @@ public class MainController {
         updateTargetCombo();
         agentList.addListener((ListChangeListener<Agent>) c -> updateTargetCombo());
 
-        agentHealthCheckTimeline = new Timeline(new KeyFrame(Duration.seconds(15), e -> checkAllAgentsHealth()));
+        Timeline agentHealthCheckTimeline = new Timeline(
+                new KeyFrame(Duration.seconds(15), e -> checkAllAgentsHealth()));
         agentHealthCheckTimeline.setCycleCount(Timeline.INDEFINITE);
         agentHealthCheckTimeline.play();
 
@@ -460,10 +452,10 @@ public class MainController {
     }
 
     private void setupAutoRefresh() {
-        autoRefreshTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> handleGetLogs()));
+        Timeline autoRefreshTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> handleGetLogs()));
         autoRefreshTimeline.setCycleCount(Timeline.INDEFINITE);
         autoRefreshToggle.selectedProperty().addListener((obs, oldVal, newVal) -> {
-            if (newVal)
+            if (Boolean.TRUE.equals(newVal))
                 autoRefreshTimeline.play();
             else
                 autoRefreshTimeline.stop();
@@ -530,13 +522,13 @@ public class MainController {
     private void updateTargetCombo() {
         Agent selected = targetAgentCombo.getValue();
         ObservableList<Agent> comboItems = FXCollections.observableArrayList();
-        comboItems.add(ALL_AGENTS);
+        comboItems.add(allAgents);
         comboItems.addAll(agentList);
         targetAgentCombo.setItems(comboItems);
         if (selected != null && comboItems.contains(selected))
             targetAgentCombo.setValue(selected);
         else
-            targetAgentCombo.setValue(ALL_AGENTS);
+            targetAgentCombo.setValue(allAgents);
     }
 
     private void checkSingleAgentHealth(Agent agent) {
@@ -718,9 +710,8 @@ public class MainController {
         filterEndDate.setValue(null);
     }
 
-    @FXML
     private void handleClearTarget() {
-        targetAgentCombo.setValue(ALL_AGENTS);
+        targetAgentCombo.setValue(allAgents);
     }
 
     private void updateCharts() {
@@ -921,9 +912,7 @@ public class MainController {
                 ExecutorService executor = Executors.newFixedThreadPool(10);
                 List<Future<List<LogEvent>>> futures = new ArrayList<>();
                 for (Agent agent : agentList) {
-                    if ("Offline".equals(agent.getStatus()))
-                        continue;
-                    if (!fetchAll && !agent.getIp().equals(targetIp))
+                    if ("Offline".equals(agent.getStatus()) || (!fetchAll && !agent.getIp().equals(targetIp)))
                         continue;
                     Callable<List<LogEvent>> job = () -> {
                         try {
