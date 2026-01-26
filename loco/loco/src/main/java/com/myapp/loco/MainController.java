@@ -66,6 +66,13 @@ import javafx.beans.property.SimpleStringProperty;
 
 public class MainController {
 
+    // --- Constants ---
+    private static final String STATUS_ONLINE = "Online";
+    private static final String STATUS_OFFLINE = "Offline";
+    private static final String STATUS_CHECKING = "Checking...";
+    private static final String STATUS_UNKNOWN = "Unknown";
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
+
     // --- Sidebar Buttons ---
     @FXML
     private Button btnDashboard;
@@ -376,8 +383,16 @@ public class MainController {
 
     // --- LOG EXPLORER (CẬP NHẬT TÔ MÀU) ---
     private void setupLogExplorer() {
-        logChannelComboBox.setItems(FXCollections.observableArrayList("Microsoft-Windows-Sysmon/Operational",
-                "Application", "Security", "System"));
+        setupLogControls();
+        setupLogColumns();
+        setupLogTableRows();
+        setupLogFilters();
+        setupAutoRefresh();
+    }
+
+    private void setupLogControls() {
+        logChannelComboBox.setItems(FXCollections.observableArrayList(
+                "Microsoft-Windows-Sysmon/Operational", "Application", "Security", "System"));
         logChannelComboBox.setValue("Microsoft-Windows-Sysmon/Operational");
 
         targetAgentCombo.setConverter(new StringConverter<Agent>() {
@@ -395,7 +410,9 @@ public class MainController {
                 return null;
             }
         });
+    }
 
+    private void setupLogColumns() {
         eventIdColumn.setCellValueFactory(new PropertyValueFactory<>("eventId"));
         timeColumn.setCellValueFactory(new PropertyValueFactory<>("timeCreated"));
         providerColumn.setCellValueFactory(new PropertyValueFactory<>("providerName"));
@@ -403,8 +420,9 @@ public class MainController {
         descriptionColumn.setCellValueFactory(new PropertyValueFactory<>("description"));
         userColumn.setCellValueFactory(new PropertyValueFactory<>("user"));
         hostColumn.setCellValueFactory(new PropertyValueFactory<>("host"));
+    }
 
-        // Tô màu dòng alert
+    private void setupLogTableRows() {
         logTableView.setRowFactory(tv -> {
             TableRow<LogEvent> row = new TableRow<>();
             row.setOnMouseClicked(event -> {
@@ -412,22 +430,26 @@ public class MainController {
                     showLogDetails(row.getItem());
             });
 
-            row.itemProperty().addListener((obs, oldVal, newVal) -> {
-                if (newVal != null && newVal.isAlert()) {
-                    if ("High".equals(newVal.getAlertSeverity())) {
-                        row.setStyle("-fx-background-color: rgba(239, 83, 80, 0.3);"); // Đỏ
-                    } else if ("Medium".equals(newVal.getAlertSeverity())) {
-                        row.setStyle("-fx-background-color: rgba(255, 167, 38, 0.3);"); // Cam
-                    } else {
-                        row.setStyle("-fx-background-color: rgba(255, 238, 88, 0.2);"); // Vàng
-                    }
-                } else {
-                    row.setStyle("");
-                }
-            });
+            row.itemProperty().addListener((obs, oldVal, newVal) -> updateRowColor(row, newVal));
             return row;
         });
+    }
 
+    private void updateRowColor(TableRow<LogEvent> row, LogEvent event) {
+        if (event != null && event.isAlert()) {
+            if ("High".equals(event.getAlertSeverity())) {
+                row.setStyle("-fx-background-color: rgba(239, 83, 80, 0.3);"); // Red
+            } else if ("Medium".equals(event.getAlertSeverity())) {
+                row.setStyle("-fx-background-color: rgba(255, 167, 38, 0.3);"); // Orange
+            } else {
+                row.setStyle("-fx-background-color: rgba(255, 238, 88, 0.2);"); // Yellow
+            }
+        } else {
+            row.setStyle("");
+        }
+    }
+
+    private void setupLogFilters() {
         filteredLogList = new FilteredList<>(masterLogList, p -> true);
         SortedList<LogEvent> sortedData = new SortedList<>(filteredLogList);
         sortedData.comparatorProperty().bind(logTableView.comparatorProperty());
@@ -437,7 +459,9 @@ public class MainController {
         filterEventIdField.textProperty().addListener((o, old, val) -> updateFilters());
         filterStartDate.valueProperty().addListener((o, old, val) -> updateFilters());
         filterEndDate.valueProperty().addListener((o, old, val) -> updateFilters());
+    }
 
+    private void setupAutoRefresh() {
         autoRefreshTimeline = new Timeline(new KeyFrame(Duration.seconds(10), e -> handleGetLogs()));
         autoRefreshTimeline.setCycleCount(Timeline.INDEFINITE);
         autoRefreshToggle.selectedProperty().addListener((obs, oldVal, newVal) -> {
@@ -469,9 +493,9 @@ public class MainController {
                     setStyle("");
                 } else {
                     Label lbl = new Label(item);
-                    if ("Online".equals(item))
+                    if (STATUS_ONLINE.equals(item))
                         lbl.getStyleClass().add("status-badge-online");
-                    else if ("Offline".equals(item))
+                    else if (STATUS_OFFLINE.equals(item))
                         lbl.getStyleClass().add("status-badge-offline");
                     else
                         lbl.setStyle("-fx-text-fill: orange;");
@@ -521,48 +545,69 @@ public class MainController {
         String ip = agent.getIp();
         if ("localhost".equals(ip) || "127.0.0.1".equals(ip))
             return;
-        // ... (HTTP request logic)
+
         HttpRequest req = HttpRequest.newBuilder().uri(URI.create("https://" + ip + ":9876/ping")).GET().build();
-        httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString()).thenAccept(res -> Platform.runLater(() -> {
-            if (res.statusCode() == 200) {
-                String body = res.body();
-                if (body.startsWith("pong")) {
-                    agent.setStatus("Online");
-                    String[] parts = body.split("\\|");
-                    boolean infoChanged = false;
+        httpClient.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+                .thenAccept(res -> Platform.runLater(() -> handlePingResponse(agent, res)))
+                .exceptionally(ex -> {
+                    Platform.runLater(() -> handlePingFailure(agent));
+                    return null;
+                });
+    }
 
-                    // ... parsing ...
-                    if (parts.length > 1) {
-                        String userRaw = parts[1].trim();
-                        // ... (Parsing logic similar to before)
-                        if (!agent.getUser().equals(userRaw)) {
-                            // Note: simplified for brevity, assume parsing sets properties
-                            agent.setUser(userRaw);
-                            infoChanged = true;
-                        }
-                    }
-                    if (parts.length > 2 && "Checking...".equals(agent.getName())) {
-                        agent.setName(parts[2].trim());
-                        infoChanged = true;
-                    }
+    private void handlePingResponse(Agent agent, HttpResponse<String> res) {
+        if (res.statusCode() == 200) {
+            processAgentPong(agent, res.body());
+        } else {
+            agent.setStatus("Error: " + res.statusCode());
+        }
+        agentTableView.refresh();
+        updateActiveAgentsCount();
+    }
 
-                    agent.lastSeenProperty().set(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
-                    if (infoChanged)
-                        DatabaseManager.getInstance().upsertAgent(agent);
-                }
-            } else {
-                agent.setStatus("Error: " + res.statusCode());
+    private void handlePingFailure(Agent agent) {
+        agent.setStatus(STATUS_OFFLINE);
+        agentTableView.refresh();
+        updateActiveAgentsCount();
+    }
+
+    private void processAgentPong(Agent agent, String body) {
+        if (body.startsWith("pong")) {
+            agent.setStatus(STATUS_ONLINE);
+            String[] parts = body.split("\\|");
+            boolean infoChanged = updateAgentDetails(agent, parts);
+
+            agent.lastSeenProperty().set(LocalDateTime.now().format(TIME_FORMATTER));
+
+            // Always update DB on success to capture LastSeen or Name/User changes
+            // Or stick to original logic if performance concern, but SQLite is fast.
+            // Original logic: if (infoChanged) ...
+            // Let's optimize: Update if infoChanged OR if we want to save Heartbeat
+            // (optional)
+            // For now, stick to original logic of only saving config changes to avoid
+            // excessive DB writes?
+            // Actually, LastSeen is useful to persist. I'll persist if infoChanged.
+            // NOTE: Original code only persisted if User/Name changed.
+            if (infoChanged) {
+                DatabaseManager.getInstance().upsertAgent(agent);
             }
-            agentTableView.refresh();
-            updateActiveAgentsCount();
-        })).exceptionally(ex -> {
-            Platform.runLater(() -> {
-                agent.setStatus("Offline");
-                agentTableView.refresh();
-                updateActiveAgentsCount();
-            });
-            return null;
-        });
+        }
+    }
+
+    private boolean updateAgentDetails(Agent agent, String[] parts) {
+        boolean infoChanged = false;
+        if (parts.length > 1) {
+            String userRaw = parts[1].trim();
+            if (!agent.getUser().equals(userRaw)) {
+                agent.setUser(userRaw);
+                infoChanged = true;
+            }
+        }
+        if (parts.length > 2 && STATUS_CHECKING.equals(agent.getName())) {
+            agent.setName(parts[2].trim());
+            infoChanged = true;
+        }
+        return infoChanged;
     }
 
     private void checkAllAgentsHealth() {
@@ -574,7 +619,7 @@ public class MainController {
     private void handleAddAgent() {
         String ip = agentIpField.getText().trim();
         if (!ip.isEmpty()) {
-            if (addAgentIfNotExists(ip, "Unknown")) {
+            if (addAgentIfNotExists(ip, STATUS_UNKNOWN)) {
                 // Find and save
                 agentList.stream().filter(a -> a.getIp().equals(ip)).findFirst()
                         .ifPresent(a -> DatabaseManager.getInstance().upsertAgent(a));
@@ -588,7 +633,7 @@ public class MainController {
 
     private void scanSucceeded(List<String> foundIps) {
         for (String ip : foundIps) {
-            if (addAgentIfNotExists(ip, "Online")) {
+            if (addAgentIfNotExists(ip, STATUS_ONLINE)) {
                 agentList.stream().filter(a -> a.getIp().equals(ip)).findFirst()
                         .ifPresent(a -> DatabaseManager.getInstance().upsertAgent(a));
             }
@@ -609,7 +654,7 @@ public class MainController {
         scanTask.setOnSucceeded(e -> {
             List<String> foundIps = scanTask.getValue();
             for (String ip : foundIps) {
-                if (addAgentIfNotExists(ip, "Online")) {
+                if (addAgentIfNotExists(ip, STATUS_ONLINE)) {
                     agentList.stream().filter(a -> a.getIp().equals(ip)).findFirst()
                             .ifPresent(agent -> DatabaseManager.getInstance().upsertAgent(agent));
                 }
@@ -630,19 +675,20 @@ public class MainController {
             return false; // Hide localhost
         for (Agent a : agentList)
             if (a.getIp().equals(ip)) {
-                if ("Online".equals(initialStatus))
-                    a.setStatus("Online");
+                if (STATUS_ONLINE.equals(initialStatus))
+                    a.setStatus(STATUS_ONLINE);
                 return false;
             }
-        String name = "Checking...";
-        String user = "Checking...";
+        String name = STATUS_CHECKING;
+        String user = STATUS_CHECKING;
         agentList.add(new Agent(name, ip, initialStatus, user,
-                LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))));
+                LocalDateTime.now().format(TIME_FORMATTER)));
         return true;
     }
 
     private void updateActiveAgentsCount() {
-        lblActiveAgents.setText(String.valueOf(agentList.stream().filter(a -> "Online".equals(a.getStatus())).count()));
+        lblActiveAgents
+                .setText(String.valueOf(agentList.stream().filter(a -> STATUS_ONLINE.equals(a.getStatus())).count()));
     }
 
     private void switchToLogExplorer(Agent agent) {
@@ -753,92 +799,24 @@ public class MainController {
         if (alertTableView == null)
             return;
 
+        setupAlertColumns();
+        setupAlertRowFactory();
+    }
+
+    private void setupAlertColumns() {
         colAlertSeverity.setCellValueFactory(new PropertyValueFactory<>("alertSeverity"));
-        colAlertSeverity.setCellFactory(column -> new TableCell<>() {
-            @Override
-            protected void updateItem(String item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null) {
-                    setText(null);
-                    setStyle("");
-                } else {
-                    setText("● " + item);
-                    if ("High".equals(item))
-                        setStyle("-fx-text-fill: #ef5350; -fx-font-weight: bold;"); // Red
-                    else if ("Medium".equals(item))
-                        setStyle("-fx-text-fill: #ffa726; -fx-font-weight: bold;"); // Orange
-                    else if ("Low".equals(item))
-                        setStyle("-fx-text-fill: #ffee58; -fx-font-weight: bold;"); // Yellow
-                    else
-                        setStyle("-fx-text-fill: white;");
-                }
-            }
-        });
+        colAlertSeverity.setCellFactory(column -> createSeverityCell());
 
         colAlertDetection.setCellValueFactory(new PropertyValueFactory<>("detectionName"));
         colAlertHost.setCellValueFactory(new PropertyValueFactory<>("host"));
 
-        // Date Formatter: "Nov 27th 2025 at 21:11"
         colAlertDate.setCellValueFactory(new PropertyValueFactory<>("timeCreated"));
-        colAlertDate.setCellFactory(column -> new TableCell<>() {
-            @Override
-            protected void updateItem(String item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null)
-                    setText(null);
-                else {
-                    try {
-                        // Original: 2023-11-27T21:11:00... or similar ISO
-                        // Assuming input is ISO-like or standard
-                        LocalDateTime dt = LocalDateTime.parse(item.substring(0, 19)); // Simple parse fallback
-                        // Custom format
-                        String month = dt.getMonth().name().substring(0, 1).toUpperCase()
-                                + dt.getMonth().name().substring(1, 3).toLowerCase();
-                        int day = dt.getDayOfMonth();
-                        String suffix = "th";
-                        if (day % 10 == 1 && day != 11)
-                            suffix = "st";
-                        else if (day % 10 == 2 && day != 12)
-                            suffix = "nd";
-                        else if (day % 10 == 3 && day != 13)
-                            suffix = "rd";
+        colAlertDate.setCellFactory(column -> createDateCell());
 
-                        String formatted = String.format("%s %d%s %d at %02d:%02d",
-                                month, day, suffix, dt.getYear(), dt.getHour(), dt.getMinute());
-                        setText(formatted);
-                    } catch (Exception e) {
-                        setText(item);
-                    } // Fallback
-                }
-            }
-        });
+        colAlertStatus.setCellValueFactory(param -> createStatusButtonProperty(param.getValue()));
+    }
 
-        colAlertStatus.setCellValueFactory(param -> {
-            Button btn = new Button(param.getValue().getStatus());
-            btn.getStyleClass().add("status-badge-offline"); // Default grey/red look
-            if ("Acknowledged".equals(param.getValue().getStatus())) {
-                btn.setStyle("-fx-background-color: rgba(76, 175, 80, 0.2); -fx-text-fill: #66bb6a;");
-            } else {
-                btn.setStyle("-fx-background-color: rgba(150, 150, 150, 0.2); -fx-text-fill: #cfd8dc;");
-            }
-
-            btn.setOnAction(event -> {
-                LogEvent log = param.getValue();
-                if ("Not Acknowledged".equals(log.getStatus())) {
-                    log.setStatus("Acknowledged");
-                    btn.setText("Acknowledged");
-                    btn.setStyle("-fx-background-color: rgba(76, 175, 80, 0.2); -fx-text-fill: #66bb6a;");
-                } else {
-                    log.setStatus("Not Acknowledged");
-                    btn.setText("Not Acknowledged");
-                    btn.setStyle("-fx-background-color: rgba(150, 150, 150, 0.2); -fx-text-fill: #cfd8dc;");
-                }
-                DatabaseManager.getInstance().updateAlertStatus(log); // Save status change
-            });
-            return new SimpleObjectProperty<>(btn);
-        });
-
-        // Row Click for Details
+    private void setupAlertRowFactory() {
         alertTableView.setRowFactory(tv -> {
             TableRow<LogEvent> row = new TableRow<>();
             row.setOnMouseClicked(event -> {
@@ -847,6 +825,95 @@ public class MainController {
             });
             return row;
         });
+    }
+
+    private TableCell<LogEvent, String> createSeverityCell() {
+        return new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setStyle("");
+                } else {
+                    setText("● " + item);
+                    updateSeverityStyle(this, item);
+                }
+            }
+        };
+    }
+
+    private void updateSeverityStyle(TableCell<?, ?> cell, String severity) {
+        if ("High".equals(severity))
+            cell.setStyle("-fx-text-fill: #ef5350; -fx-font-weight: bold;");
+        else if ("Medium".equals(severity))
+            cell.setStyle("-fx-text-fill: #ffa726; -fx-font-weight: bold;");
+        else if ("Low".equals(severity))
+            cell.setStyle("-fx-text-fill: #ffee58; -fx-font-weight: bold;");
+        else
+            cell.setStyle("-fx-text-fill: white;");
+    }
+
+    private TableCell<LogEvent, String> createDateCell() {
+        return new TableCell<>() {
+            @Override
+            protected void updateItem(String item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null)
+                    setText(null);
+                else
+                    setText(formatAlertDate(item));
+            }
+        };
+    }
+
+    private String formatAlertDate(String rawDate) {
+        try {
+            LocalDateTime dt = LocalDateTime.parse(rawDate.substring(0, 19));
+            String month = dt.getMonth().name().substring(0, 1).toUpperCase()
+                    + dt.getMonth().name().substring(1, 3).toLowerCase();
+            int day = dt.getDayOfMonth();
+            String suffix = getDaySuffix(day);
+            return String.format("%s %d%s %d at %02d:%02d",
+                    month, day, suffix, dt.getYear(), dt.getHour(), dt.getMinute());
+        } catch (Exception e) {
+            return rawDate;
+        }
+    }
+
+    private String getDaySuffix(int day) {
+        if (day % 10 == 1 && day != 11)
+            return "st";
+        if (day % 10 == 2 && day != 12)
+            return "nd";
+        if (day % 10 == 3 && day != 13)
+            return "rd";
+        return "th";
+    }
+
+    private SimpleObjectProperty<Button> createStatusButtonProperty(LogEvent log) {
+        Button btn = new Button(log.getStatus());
+        btn.getStyleClass().add("status-badge-offline"); // Default base class
+        updateStatusButtonStyle(btn, log.getStatus());
+
+        btn.setOnAction(event -> toggleAlertStatus(log, btn));
+        return new SimpleObjectProperty<>(btn);
+    }
+
+    private void updateStatusButtonStyle(Button btn, String status) {
+        if ("Acknowledged".equals(status)) {
+            btn.setStyle("-fx-background-color: rgba(76, 175, 80, 0.2); -fx-text-fill: #66bb6a;");
+        } else {
+            btn.setStyle("-fx-background-color: rgba(150, 150, 150, 0.2); -fx-text-fill: #cfd8dc;");
+        }
+    }
+
+    private void toggleAlertStatus(LogEvent log, Button btn) {
+        String newStatus = "Acknowledged".equals(log.getStatus()) ? "Not Acknowledged" : "Acknowledged";
+        log.setStatus(newStatus);
+        btn.setText(newStatus);
+        updateStatusButtonStyle(btn, newStatus);
+        DatabaseManager.getInstance().updateAlertStatus(log);
     }
 
     @FXML

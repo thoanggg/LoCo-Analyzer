@@ -110,39 +110,54 @@ public class AdvancedRulesEngine {
         Map<String, String> data = log.getEventData();
         String eventId = log.getEventId();
 
-        // --- HARDCODED RULES --- (Keeping existing logic)
+        checkSuspiciousOfficeChildProcess(log, data, eventId);
+        checkUnsignedExecutable(log, data, eventId);
+        checkLsassMemoryAccess(log, data, eventId);
+        checkMimikatzActivity(log, data, eventId);
+        checkStickyKeys(log, data, eventId);
+        checkNewServices(log, eventId);
+        checkLogClearing(log, data, eventId);
+        checkRdpLogin(log, data, eventId);
+        checkSuspiciousNetworkConnection(log, data, eventId);
 
-        // Rule 1
+        // --- DYNAMIC RULES EVALUATION ---
+        evaluateSigmaRules(log);
+    }
+
+    private static void checkSuspiciousOfficeChildProcess(LogEvent log, Map<String, String> data, String eventId) {
         if ("4688".equals(eventId) || "1".equals(eventId)) {
             String parent = data.getOrDefault("ParentImage", "").toLowerCase();
             String child = data.getOrDefault("Image", "").toLowerCase();
-            if (child.isEmpty())
+            if (child.isEmpty()) {
                 child = data.getOrDefault("NewProcessName", "").toLowerCase();
+            }
             if ((parent.endsWith("winword.exe") || parent.endsWith("excel.exe") || parent.endsWith("outlook.exe")) &&
                     (child.endsWith("cmd.exe") || child.endsWith("powershell.exe") || child.endsWith("wscript.exe"))) {
                 triggerAlert(log, "Suspicious Office Child Process", "High", "T1204");
-                return;
             }
         }
+    }
 
-        // Rule 2
+    private static void checkUnsignedExecutable(LogEvent log, Map<String, String> data, String eventId) {
         if ("4688".equals(eventId) || "1".equals(eventId) || "7".equals(eventId)) {
             String image = data.getOrDefault("Image", "").toLowerCase();
-            if (image.isEmpty())
+            if (image.isEmpty()) {
                 image = data.getOrDefault("NewProcessName", "").toLowerCase();
-            if (image.isEmpty())
+            }
+            if (image.isEmpty()) {
                 image = data.getOrDefault("ImageLoaded", "").toLowerCase();
+            }
             if (image.contains("\\users\\public\\") || image.contains("\\appdata\\local\\temp\\")
                     || image.contains("\\windows\\temp\\")) {
                 String signed = data.getOrDefault("Signed", "true");
                 if ("false".equals(signed) || "Revoked".equals(signed)) {
                     triggerAlert(log, "Unsigned Executable in Suspect Folder", "Medium", "T1204");
-                    return;
                 }
             }
         }
+    }
 
-        // Rule 3: LSASS
+    private static void checkLsassMemoryAccess(LogEvent log, Map<String, String> data, String eventId) {
         if ("10".equals(eventId)) {
             String target = data.getOrDefault("TargetImage", "").toLowerCase();
             String access = data.getOrDefault("GrantedAccess", "");
@@ -150,78 +165,69 @@ public class AdvancedRulesEngine {
                 String source = data.getOrDefault("SourceImage", "").toLowerCase();
                 if (!source.endsWith("svchost.exe") && !source.contains("antivirus")) {
                     triggerAlert(log, "LSASS Memory Access Detected", "Critical", "T1003");
-                    return;
                 }
             }
         }
+    }
 
-        // Rule 4: Mimikatz
+    private static void checkMimikatzActivity(LogEvent log, Map<String, String> data, String eventId) {
         if ("4688".equals(eventId) || "1".equals(eventId) || "4104".equals(eventId)) {
             String cmd = data.getOrDefault("CommandLine", "").toLowerCase();
-            if (cmd.isEmpty())
+            if (cmd.isEmpty()) {
                 cmd = data.getOrDefault("ScriptBlockText", "").toLowerCase();
+            }
             if (cmd.contains("sekurlsa") || cmd.contains("logonpasswords") || cmd.contains("privilege::debug")
                     || cmd.contains("lsadump")) {
                 triggerAlert(log, "Mimikatz Activity Detected", "Critical", "T1003");
-                return;
             }
         }
+    }
 
-        // Rule 5: Sticky Keys
+    private static void checkStickyKeys(LogEvent log, Map<String, String> data, String eventId) {
         if ("4657".equals(eventId) || "12".equals(eventId) || "13".equals(eventId)) {
             String targetObj = data.getOrDefault("ObjectName", "").toLowerCase();
             if (targetObj.contains("image file execution options\\sethc.exe")) {
                 triggerAlert(log, "Sticky Keys Backdoor Attempt", "High", "T1546.008");
-                return;
             }
         }
+    }
 
-        // Rule 6: Services
+    private static void checkNewServices(LogEvent log, String eventId) {
         if ("4697".equals(eventId)) {
             triggerAlert(log, "New Service Installed", "Medium", "T1543.003");
-            return;
-        }
-        if ("4698".equals(eventId)) {
+        } else if ("4698".equals(eventId)) {
             triggerAlert(log, "New Scheduled Task Created", "Medium", "T1053.005");
-            return;
         }
+    }
 
-        // Rule 7: Log Clear
+    private static void checkLogClearing(LogEvent log, Map<String, String> data, String eventId) {
         if ("1102".equals(eventId)) {
             triggerAlert(log, "Security Log Cleared", "Critical", "T1070");
-            return;
-        }
-        if ("4688".equals(eventId) || "1".equals(eventId)) {
+        } else if ("4688".equals(eventId) || "1".equals(eventId)) {
             String cmd = data.getOrDefault("CommandLine", "").toLowerCase();
             if (cmd.contains("wevtutil") && (cmd.contains(" cl ") || cmd.contains(" clear-log"))) {
                 triggerAlert(log, "Log Clearing Attempt Command", "Critical", "T1070");
-                return;
             }
         }
+    }
 
-        // Rule 8: RDP
+    private static void checkRdpLogin(LogEvent log, Map<String, String> data, String eventId) {
         if ("4624".equals(eventId) && "10".equals(data.getOrDefault("LogonType", ""))) {
             triggerAlert(log, "RDP Login Detected", "High", "T1021");
-            return;
         }
+    }
 
-        // Rule 9: Beaconing
+    private static void checkSuspiciousNetworkConnection(LogEvent log, Map<String, String> data, String eventId) {
         if ("3".equals(eventId)) {
             String image = data.getOrDefault("Image", "").toLowerCase();
             if (image.endsWith("notepad.exe") || image.endsWith("calc.exe") || image.endsWith("mspaint.exe")) {
                 String destPort = data.getOrDefault("DestinationPort", "");
                 if ("80".equals(destPort) || "443".equals(destPort) || "8080".equals(destPort)) {
                     triggerAlert(log, "Suspicious Process Network Connection", "High", "T1071");
-                    return;
                 }
             }
         }
-
-        // --- DYNAMIC RULES MANAGEMENT ---
-
-        // --- DYNAMIC RULES EVALUATION ---
-        evaluateSigmaRules(log);
-    } // End of applyRules
+    }
 
     // --- DYNAMIC RULES MANAGEMENT ---
 
