@@ -66,6 +66,9 @@ import javafx.beans.property.SimpleStringProperty;
 
 public class MainController {
 
+    private static final java.util.logging.Logger LOGGER = java.util.logging.Logger
+            .getLogger(MainController.class.getName());
+
     // --- Constants ---
     private static final String STATUS_ONLINE = "Online";
     private static final String STATUS_OFFLINE = "Offline";
@@ -188,10 +191,8 @@ public class MainController {
     private final ObservableList<Agent> agentList = FXCollections.observableArrayList();
     private final ObservableList<LogEvent> masterLogList = FXCollections.observableArrayList();
     private FilteredList<LogEvent> filteredLogList;
-    private final ObservableList<DetectionRule> rulesList = FXCollections.observableArrayList(); // Legacy placeholder -
-                                                                                                 // will be updated
     private final ObservableList<AdvancedRulesEngine.RuleMetadata> metadataList = FXCollections.observableArrayList(); // New
-                                                                                                                       // List
+    // List
 
     private final Agent ALL_AGENTS = new Agent("All Agents", "ALL", "Virtual", "", "");
     private Timeline autoRefreshTimeline;
@@ -201,9 +202,6 @@ public class MainController {
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final DocumentBuilderFactory xmlFactory = DocumentBuilderFactory.newInstance();
     private final NetworkScanner networkScanner = new NetworkScanner();
-    private final DatabaseManager dbManager = DatabaseManager.getInstance();
-
-    private int totalAlertCount = 0;
 
     @FXML
     public void initialize() {
@@ -375,8 +373,8 @@ public class MainController {
             rulesView.setVisible(true);
             btnRules.getStyleClass().add("active");
         } else if (event.getSource() == btnAnalyze) {
-            analyzeView.setVisible(true);
-            btnAnalyze.getStyleClass().add("active");
+            if (btnAnalyze != null)
+                btnAnalyze.getStyleClass().add("active");
             updateCharts();
         }
     }
@@ -581,13 +579,6 @@ public class MainController {
 
             // Always update DB on success to capture LastSeen or Name/User changes
             // Or stick to original logic if performance concern, but SQLite is fast.
-            // Original logic: if (infoChanged) ...
-            // Let's optimize: Update if infoChanged OR if we want to save Heartbeat
-            // (optional)
-            // For now, stick to original logic of only saving config changes to avoid
-            // excessive DB writes?
-            // Actually, LastSeen is useful to persist. I'll persist if infoChanged.
-            // NOTE: Original code only persisted if User/Name changed.
             if (infoChanged) {
                 DatabaseManager.getInstance().upsertAgent(agent);
             }
@@ -630,15 +621,6 @@ public class MainController {
     }
 
     // ...
-
-    private void scanSucceeded(List<String> foundIps) {
-        for (String ip : foundIps) {
-            if (addAgentIfNotExists(ip, STATUS_ONLINE)) {
-                agentList.stream().filter(a -> a.getIp().equals(ip)).findFirst()
-                        .ifPresent(a -> DatabaseManager.getInstance().upsertAgent(a));
-            }
-        }
-    }
 
     // Note: handleScanNetwork calls uses inline task, we need to update that too.
     @FXML
@@ -721,6 +703,7 @@ public class MainController {
                     if (endDate != null && logDate.isAfter(endDate))
                         return false;
                 } catch (Exception e) {
+                    LOGGER.warning("Invalid date format in log: " + log.getTimeCreated());
                 }
             }
             return true;
@@ -945,7 +928,7 @@ public class MainController {
                     Callable<List<LogEvent>> job = () -> {
                         try {
                             if ("127.0.0.1".equals(agent.getIp()))
-                                return fetchLocalLogs(request);
+                                return fetchLocalLogs();
                             else
                                 return fetchRemoteLogs(request, "https://" + agent.getIp() + ":9876");
                         } catch (Exception e) {
@@ -957,6 +940,8 @@ public class MainController {
                 for (Future<List<LogEvent>> f : futures) {
                     try {
                         allLogs.addAll(f.get());
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
                     } catch (Exception e) {
                         e.printStackTrace();
                     }
@@ -979,11 +964,11 @@ public class MainController {
         new Thread(task).start();
     }
 
-    private List<LogEvent> fetchLocalLogs(LogRequest request) {
+    private List<LogEvent> fetchLocalLogs() {
         // Admin is running on Linux/Ubuntu, so we cannot Use wevtutil (Windows).
         // For now, we return an empty list or a system notification event.
         // In the future, we could map this to /var/log/syslog if desired.
-        System.out.println("Admin is on Linux. Skipping local Windows log fetch.");
+        LOGGER.info("Admin is on Linux. Skipping local Windows log fetch.");
         return new ArrayList<>();
     }
 
@@ -993,7 +978,7 @@ public class MainController {
                 .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(jsonBody)).build();
         HttpResponse<String> res = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
         if (res.statusCode() != 200)
-            throw new RuntimeException("Remote Error: " + res.body());
+            throw new java.io.IOException("Remote Error: " + res.body());
         return parseLogEvents(res.body());
     }
 

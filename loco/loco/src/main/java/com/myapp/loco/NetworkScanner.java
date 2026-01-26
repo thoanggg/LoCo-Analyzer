@@ -8,6 +8,8 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class NetworkScanner {
+    private static final java.util.logging.Logger LOGGER = java.util.logging.Logger
+            .getLogger(NetworkScanner.class.getName());
 
     /**
      * Quét TẤT CẢ các dải mạng nội bộ tìm thấy trên máy tính.
@@ -20,20 +22,19 @@ public class NetworkScanner {
 
         // Tăng số luồng lên 100 để quét nhanh hơn (vì quét nhiều subnet)
         ExecutorService executor = Executors.newFixedThreadPool(100);
-        List<Future<?>> futures = new ArrayList<>();
 
-        System.out.println("Starting scan on subnets: " + subnets);
+        LOGGER.info("Starting scan on subnets: " + subnets);
 
         try {
             for (String subnet : subnets) {
                 // Quét từ .1 đến .254 cho mỗi subnet
                 for (int i = 1; i < 255; i++) {
                     String ip = subnet + "." + i;
-                    futures.add(executor.submit(() -> {
+                    executor.submit(() -> {
                         if (checkPort(ip, 9876)) {
                             activeIps.add(ip);
                         }
-                    }));
+                    });
                 }
             }
         } finally {

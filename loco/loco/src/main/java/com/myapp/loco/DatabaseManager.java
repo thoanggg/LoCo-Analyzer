@@ -12,6 +12,8 @@ import com.myapp.loco.sigma.SigmaRule;
 
 public class DatabaseManager {
     private static final String DB_URL = "jdbc:sqlite:loco.db";
+    private static final java.util.logging.Logger LOGGER = java.util.logging.Logger
+            .getLogger(DatabaseManager.class.getName());
     private static DatabaseManager instance;
     private final ObjectMapper jsonMapper = new ObjectMapper();
 
@@ -67,7 +69,7 @@ public class DatabaseManager {
                     ")");
 
         } catch (SQLException e) {
-            System.err.println("DB Init Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "DB Init Failed", e);
         }
     }
 
@@ -83,7 +85,7 @@ public class DatabaseManager {
             pstmt.setString(5, agent.getLastSeen());
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Upsert Agent Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Upsert Agent Failed", e);
         }
     }
 
@@ -94,13 +96,13 @@ public class DatabaseManager {
             pstmt.setString(1, ip);
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Remove Agent Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Remove Agent Failed", e);
         }
     }
 
     public List<Agent> getAllAgents() {
         List<Agent> agents = new ArrayList<>();
-        String sql = "SELECT * FROM agents";
+        String sql = "SELECT name, ip, status, user, last_seen FROM agents";
         try (Connection conn = DriverManager.getConnection(DB_URL);
                 Statement stmt = conn.createStatement();
                 ResultSet rs = stmt.executeQuery(sql)) {
@@ -114,7 +116,7 @@ public class DatabaseManager {
                 agents.add(a);
             }
         } catch (SQLException e) {
-            System.err.println("Get Agents Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Get Agents Failed", e);
         }
         return agents;
     }
@@ -132,18 +134,22 @@ public class DatabaseManager {
             pstmt.setString(6, log.getUser());
             pstmt.setString(7, log.getHost());
             pstmt.setString(8, log.getFullDetails());
-            try {
-                pstmt.setString(9, jsonMapper.writeValueAsString(log.getEventData()));
-            } catch (JsonProcessingException e) {
-                pstmt.setString(9, "{}");
-            }
+            pstmt.setString(9, serializeEventData(log.getEventData()));
             pstmt.setString(10, log.getAlertSeverity());
             pstmt.setString(11, log.getDetectionName());
             pstmt.setString(12, log.getMitreId());
             pstmt.setString(13, log.getStatus());
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Insert Alert Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Insert Alert Failed", e);
+        }
+    }
+
+    private String serializeEventData(Map<String, String> eventData) {
+        try {
+            return jsonMapper.writeValueAsString(eventData);
+        } catch (JsonProcessingException e) {
+            return "{}";
         }
     }
 
@@ -156,26 +162,18 @@ public class DatabaseManager {
             pstmt.setString(3, log.getTimeCreated());
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Update Alert Status Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Update Alert Status Failed", e);
         }
     }
 
     public List<LogEvent> getAllAlerts() {
         List<LogEvent> alerts = new ArrayList<>();
-        String sql = "SELECT * FROM alerts ORDER BY time_created DESC";
+        String sql = "SELECT event_id, time_created, provider, level, description, user, host, full_details, event_data, alert_severity, detection_name, mitre_id, status FROM alerts ORDER BY time_created DESC";
         try (Connection conn = DriverManager.getConnection(DB_URL);
                 Statement stmt = conn.createStatement();
                 ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
-                Map<String, String> eventData = new HashMap<>();
-                try {
-                    String jsonData = rs.getString("event_data");
-                    if (jsonData != null && !jsonData.isEmpty()) {
-                        eventData = jsonMapper.readValue(jsonData, new TypeReference<>() {
-                        });
-                    }
-                } catch (Exception e) {
-                }
+                Map<String, String> eventData = parseEventData(rs.getString("event_data"));
 
                 LogEvent log = new LogEvent(
                         rs.getString("event_id"),
@@ -195,9 +193,21 @@ public class DatabaseManager {
                 alerts.add(log);
             }
         } catch (SQLException e) {
-            System.err.println("Get Alerts Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Get Alerts Failed", e);
         }
         return alerts;
+    }
+
+    private Map<String, String> parseEventData(String jsonData) {
+        try {
+            if (jsonData != null && !jsonData.isEmpty()) {
+                return jsonMapper.readValue(jsonData, new TypeReference<>() {
+                });
+            }
+        } catch (Exception e) {
+            // Ignore parse errors, return empty map
+        }
+        return new HashMap<>();
     }
 
     // --- Rules ---
@@ -205,14 +215,14 @@ public class DatabaseManager {
         String sql = "INSERT OR REPLACE INTO rules(id, title, description, level, yaml_content) VALUES(?, ?, ?, ?, ?)";
         try (Connection conn = DriverManager.getConnection(DB_URL);
                 PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, rule.getId()); // ID is required now
+            pstmt.setString(1, rule.getId());
             pstmt.setString(2, rule.getTitle());
             pstmt.setString(3, rule.getDescription());
             pstmt.setString(4, rule.getLevel());
             pstmt.setString(5, yamlContent);
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Insert Rule Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Insert Rule Failed", e);
         }
     }
 
@@ -223,13 +233,13 @@ public class DatabaseManager {
             pstmt.setString(1, id);
             pstmt.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("Delete Rule Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Delete Rule Failed", e);
         }
     }
 
     public List<Map<String, String>> getAllRules() {
         List<Map<String, String>> rules = new ArrayList<>();
-        String sql = "SELECT * FROM rules";
+        String sql = "SELECT id, yaml_content FROM rules";
         try (Connection conn = DriverManager.getConnection(DB_URL);
                 Statement stmt = conn.createStatement();
                 ResultSet rs = stmt.executeQuery(sql)) {
@@ -240,7 +250,7 @@ public class DatabaseManager {
                 rules.add(map);
             }
         } catch (SQLException e) {
-            System.err.println("Get Rules Failed: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Get Rules Failed", e);
         }
         return rules;
     }

@@ -9,6 +9,10 @@ import java.util.Map;
 
 public class SigmaParser {
 
+    private SigmaParser() {
+        throw new IllegalStateException("Utility class");
+    }
+
     public static SigmaRule parse(String yamlContent) {
         Yaml yaml = new Yaml();
         try {
@@ -16,7 +20,7 @@ public class SigmaParser {
             Map<String, Object> data = yaml.load(yamlContent);
             return mapToRule(data);
         } catch (Exception e) {
-            throw new RuntimeException("Failed to parse Sigma YAML: " + e.getMessage(), e);
+            throw new IllegalArgumentException("Failed to parse Sigma YAML: " + e.getMessage(), e);
         }
     }
 

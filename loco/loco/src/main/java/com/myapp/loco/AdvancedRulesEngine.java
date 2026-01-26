@@ -43,28 +43,44 @@ public class AdvancedRulesEngine {
         }
     }
 
+    private static final java.util.logging.Logger LOGGER = java.util.logging.Logger
+            .getLogger(AdvancedRulesEngine.class.getName());
+
+    // Hide implicit public constructor
+    private AdvancedRulesEngine() {
+        throw new IllegalStateException("Utility class");
+    }
+
     // --- DYNAMIC SIGMA RULE SUPPORT ---
     private static final java.util.List<com.myapp.loco.sigma.SigmaRule> dynamicRules = new java.util.ArrayList<>();
 
     // Load persisted rules
     static {
+        loadRulesFromDB();
+    }
+
+    private static void loadRulesFromDB() {
         try {
             java.util.List<java.util.Map<String, String>> savedRules = DatabaseManager.getInstance().getAllRules();
             for (java.util.Map<String, String> ruleData : savedRules) {
                 String yaml = ruleData.get("yaml");
                 if (yaml != null && !yaml.isEmpty()) {
-                    try {
-                        com.myapp.loco.sigma.SigmaRule rule = com.myapp.loco.sigma.SigmaParser.parse(yaml);
-                        if (rule != null) {
-                            dynamicRules.add(rule);
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Failed to load rule: " + e.getMessage());
-                    }
+                    parseAndAddRule(yaml);
                 }
             }
         } catch (Exception e) {
-            System.err.println("Failed to init rules from DB: " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.SEVERE, "Failed to init rules from DB", e);
+        }
+    }
+
+    private static void parseAndAddRule(String yaml) {
+        try {
+            com.myapp.loco.sigma.SigmaRule rule = com.myapp.loco.sigma.SigmaParser.parse(yaml);
+            if (rule != null) {
+                dynamicRules.add(rule);
+            }
+        } catch (Exception e) {
+            LOGGER.log(java.util.logging.Level.WARNING, "Failed to load rule", e);
         }
     }
 
@@ -96,12 +112,22 @@ public class AdvancedRulesEngine {
 
         // 2. Add Dynamic Sigma Rules
         for (com.myapp.loco.sigma.SigmaRule s : dynamicRules) {
-            rules.add(new RuleMetadata(
-                    s.getId(),
-                    s.getTitle(),
-                    s.getLevel() != null ? s.getLevel() : "Medium",
-                    s.getId(), // Using ID for MITRE col if no MITRE tag, or handle differently logic later
-                    s.getDescription() != null ? s.getDescription() : "Sigma Rule"));
+            rules.add(
+                    new RuleMetadata(s.getId(), s.getTitle(), s.getLevel() != null ? s.getLevel() : "Medium", s.getId(), // Using
+                                                                                                                         // ID
+                                                                                                                         // for
+                                                                                                                         // MITRE
+                                                                                                                         // col
+                                                                                                                         // if
+                                                                                                                         // no
+                                                                                                                         // MITRE
+                                                                                                                         // tag,
+                                                                                                                         // or
+                                                                                                                         // handle
+                                                                                                                         // differently
+                                                                                                                         // logic
+                                                                                                                         // later
+                            s.getDescription() != null ? s.getDescription() : "Sigma Rule"));
         }
         return rules;
     }
@@ -131,8 +157,9 @@ public class AdvancedRulesEngine {
             if (child.isEmpty()) {
                 child = data.getOrDefault("NewProcessName", "").toLowerCase();
             }
-            if ((parent.endsWith("winword.exe") || parent.endsWith("excel.exe") || parent.endsWith("outlook.exe")) &&
-                    (child.endsWith("cmd.exe") || child.endsWith("powershell.exe") || child.endsWith("wscript.exe"))) {
+            if ((parent.endsWith("winword.exe") || parent.endsWith("excel.exe") || parent.endsWith("outlook.exe"))
+                    && (child.endsWith("cmd.exe") || child.endsWith("powershell.exe")
+                            || child.endsWith("wscript.exe"))) {
                 triggerAlert(log, "Suspicious Office Child Process", "High", "T1204");
             }
         }
@@ -276,7 +303,12 @@ public class AdvancedRulesEngine {
         for (Map.Entry<String, Object> entry : detection.entrySet()) {
             if (!"condition".equals(entry.getKey()) && entry.getValue() instanceof Map) {
                 if (matchesSelection(event, (Map<?, ?>) entry.getValue())) {
-                    return true; // Simplified OR logic across named selections
+                    return true; // Simplified
+                                 // OR
+                                 // logic
+                                 // across
+                                 // named
+                                 // selections
                 }
             }
         }
@@ -301,7 +333,8 @@ public class AdvancedRulesEngine {
             }
 
             if (eventValue == null || !eventValue.toLowerCase().contains(value.toLowerCase())) {
-                return false; // AND logic: all fields in selection must match
+                return false; // AND logic: all fields in
+                              // selection must match
             }
         }
         return true;
