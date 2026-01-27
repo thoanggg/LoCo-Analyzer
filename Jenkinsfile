@@ -56,15 +56,22 @@ pipeline {
                          rm jdk.tar.gz
                     fi
 
-                    # Run JPackage for Linux using the downloaded JDK
+                    # Create custom runtime manually to avoid objcopy dependency (jpackage might try to strip by default)
+                    ./jdk-21/bin/jlink \
+                        --module-path jdk-21/jmods \
+                        --add-modules java.base,java.sql,java.rmi,java.management,java.logging,java.xml,java.naming,java.net.http,java.desktop,jdk.unsupported,jdk.crypto.ec,jdk.management.jfr \
+                        --output runtime \
+                        --no-header-files \
+                        --no-man-pages \
+                        --compress=2
+
+                    # Run JPackage for Linux using the pre-built runtime
                     ./jdk-21/bin/jpackage --name Loco \
                              --input target/libs \
                              --main-jar loco-1.0-SNAPSHOT.jar \
                              --main-class com.myapp.loco.Launcher \
                              --type app-image \
-                             --strip-native-commands false \
-                             --module-path jdk-21/jmods \
-                             --add-modules java.base,java.sql,java.rmi,java.management,java.logging,java.xml,java.naming,java.net.http,java.desktop,jdk.unsupported,jdk.crypto.ec,jdk.management.jfr \
+                             --runtime-image runtime \
                              --dest output
 
                     # Fix duplicate JavaFX jars for Linux runtime
