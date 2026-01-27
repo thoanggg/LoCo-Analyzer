@@ -29,9 +29,6 @@ class DatabaseManagerTest {
         if (dbFile.exists()) {
             dbFile.delete();
         }
-
-        // Initialize DB (optional, will be done on first getInstance)
-        // DatabaseManager.getInstance();
     }
 
     @AfterEach
