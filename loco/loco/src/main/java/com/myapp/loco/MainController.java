@@ -950,7 +950,26 @@ public class MainController {
             }
         };
         task.setOnSucceeded(e -> {
-            masterLogList.setAll(task.getValue());
+            List<LogEvent> fetchedLogs = task.getValue();
+            // Preserve historical alerts from DB
+            List<LogEvent> dbAlerts = DatabaseManager.getInstance().getAllAlerts();
+
+            Map<String, LogEvent> uniqueEvents = new java.util.HashMap<>();
+
+            // Prioritize fetched logs (might be fresher?)
+            for (LogEvent log : fetchedLogs) {
+                // Key: Host + EventID + Time (Composite Key)
+                String key = log.getHost() + "_" + log.getEventId() + "_" + log.getTimeCreated();
+                uniqueEvents.put(key, log);
+            }
+
+            for (LogEvent alert : dbAlerts) {
+                String key = alert.getHost() + "_" + alert.getEventId() + "_" + alert.getTimeCreated();
+                uniqueEvents.putIfAbsent(key, alert);
+            }
+
+            masterLogList.setAll(new ArrayList<>(uniqueEvents.values()));
+
             loadingIndicator.setVisible(false);
             updateCharts(); // Refresh charts when logs arrive
         });
